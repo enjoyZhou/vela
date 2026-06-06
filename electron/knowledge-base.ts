@@ -11,8 +11,6 @@
 import fs from 'node:fs'
 import path from 'node:path'
 import { randomUUID } from 'node:crypto'
-import * as lancedb from '@lancedb/lancedb'
-import { Field, FixedSizeList as ArrowFixedSizeList, Float32, Int32, Utf8, Schema as ArrowSchema } from 'apache-arrow'
 import { chunkText, generateEmbeddings } from './embedding'
 import {
   addChunks,
@@ -22,6 +20,8 @@ import {
   getStats as storeGetStats,
   migrateFromJSON,
   getChunksWithoutVectors as storeGetChunksWithoutVectors,
+  getChunksForBackfill as storeGetChunksForBackfill,
+  updateChunkVectors,
 } from './vector-store'
 
 // ===== 迁移状态跟踪 =====
@@ -306,92 +306,32 @@ export async function backfillVectors(
     const { count: total } = await storeGetChunksWithoutVectors(projectPath)
     if (total === 0) return { success: true, processed: 0, failed: 0 }
 
-    // 全量加载所有需要向量的块
-    const { getConnection } = await import('./vector-store')
-    const db = await getConnection(projectPath)
-    const tableNames = await db.tableNames()
-    if (!tableNames.includes('chunks')) {
-      return { success: false, processed: 0, failed: total, error: 'chunks 表不存在' }
-    }
-
-    const table = await db.openTable('chunks')
-    const schema = await table.schema()
-    const hasVectorCol = schema.fields.some(f => f.name === 'vector')
-
-    let allRecords: Array<{ id: string; text: string; vector?: number[] }> = []
-    if (hasVectorCol) {
-      const rows = await table.query().select(['id', 'text', 'vector']).toArray()
-      allRecords = rows.filter((r: { id: string; text: string; vector?: number[] }) =>
-        !r.vector || !Array.isArray(r.vector) || r.vector.length === 0
-      )
-    } else {
-      const rows = await table.query().select(['id', 'text']).toArray()
-      allRecords = rows.map((r: { id: string; text: string }) => ({ id: r.id, text: r.text }))
-    }
-
+    const allRecords = await storeGetChunksForBackfill(projectPath, total)
     if (allRecords.length === 0) {
-      return { success: true, processed: 0, failed: 0 }
+      return { success: false, processed: 0, failed: total, error: 'chunks 表不存在' }
     }
 
     // 批量生成向量
     const texts = allRecords.map(r => r.text)
     const vectors = await generateEmbeddings(texts, protocol, model)
 
-    // 构建更新后的完整数据
-    const idToVector = new Map<string, number[]>()
-    allRecords.forEach((r, i) => {
-      if (vectors[i] && vectors[i].length > 0) {
-        idToVector.set(r.id, vectors[i])
-      }
-    })
+    const updates = allRecords
+      .map((record, index) => {
+        const vector = vectors[index]
+        return vector && vector.length > 0 ? { id: record.id, vector } : undefined
+      })
+      .filter((update): update is { id: string; vector: number[] } => Boolean(update))
 
-    // 全量读出 + 合并更新
-    const fullTable = await db.openTable('chunks')
-    const allRows = await fullTable.query().toArray()
-    const updatedRows = allRows.map((r: { [key: string]: unknown }) => {
-      const v = idToVector.get(r.id as string)
-      return v ? { ...r, vector: v } : r
-    })
-
-    // 使用显式 Arrow Schema 确保 vector 列正确持久化
-    // LanceDB 自动推断无法正确识别 number[] 为 FixedSizeList 向量类型
-    const VECTOR_DIM = 2048
-    const vectorField = new Field('vector', new ArrowFixedSizeList(VECTOR_DIM, new Field('item', new Float32())), true)
-    const arrowSchema = new ArrowSchema([
-      new Field('id', new Utf8()),
-      new Field('docId', new Utf8()),
-      new Field('fileName', new Utf8()),
-      new Field('chapterNumber', new Int32(), true),
-      new Field('chapterTitle', new Utf8(), true),
-      new Field('text', new Utf8()),
-      vectorField,
-      new Field('chunkIndex', new Int32()),
-      new Field('totalChunks', new Int32()),
-      new Field('importedAt', new Utf8()),
-    ])
-
-    // 删除旧表，用带显式 schema 的 createTable 重新写入
-    await db.dropTable('chunks')
-    await db.createTable('chunks', updatedRows, { schema: arrowSchema })
-    // 重建 FTS 索引
-    const newTable = await db.openTable('chunks')
-    try {
-      await newTable.createIndex('text', { config: lancedb.Index.fts() })
-    } catch { /* 索引可能已存在 */ }
-
-    // 验证
-    const verifyRows = await newTable.query().select(['id', 'vector']).limit(5).toArray()
-    const withVectors = verifyRows.filter((r: { vector?: unknown }) => {
-      if (!r.vector) return false
-      const vec = r.vector as { length?: number; toArray?: () => unknown[] }
-      if (typeof vec.toArray === 'function') return vec.toArray().length > 0
-      return (vec.length ?? 0) > 0
-    }).length
-    if (withVectors === 0) {
-      return { success: false, processed: 0, failed: total, error: '回填后记录向量为空，可能是 LanceDB schema 写入失败' }
+    if (updates.length === 0) {
+      return { success: false, processed: 0, failed: total, error: '未生成有效向量，无法回填' }
     }
 
-    return { success: true, processed: idToVector.size, failed: total - idToVector.size }
+    const result = await updateChunkVectors(projectPath, updates)
+    if (!result.success) {
+      return { success: false, processed: 0, failed: total, error: '向量写回失败' }
+    }
+
+    return { success: true, processed: result.count, failed: total - result.count }
   } catch (error) {
     console.error('[Vela KB] 向量回填异常:', error)
     return { success: false, processed: 0, failed: 0, error: String(error) }

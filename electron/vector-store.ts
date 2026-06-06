@@ -62,6 +62,95 @@ export interface KBStats {
 
 const TABLE_NAME = 'chunks'
 const DOCS_TABLE_NAME = 'documents'
+const REQUIRED_CHUNK_FIELDS = [
+  'id',
+  'docId',
+  'fileName',
+  'text',
+  'chunkIndex',
+  'totalChunks',
+  'importedAt',
+  'chapterNumber',
+  'chapterTitle',
+]
+
+function getVectorDimensionFromField(field?: { type?: unknown }): number {
+  const listSize = (field?.type as { listSize?: unknown } | undefined)?.listSize
+  return typeof listSize === 'number' && Number.isInteger(listSize) && listSize > 0 ? listSize : 0
+}
+
+function getVectorDimensionFromSchema(schema: { fields: Array<{ name: string; type?: unknown }> }): number {
+  return getVectorDimensionFromField(schema.fields.find(f => f.name === 'vector'))
+}
+
+function normalizeVector(vector: unknown, expectedDimension?: number): number[] | undefined {
+  if (!Array.isArray(vector) || vector.length === 0) return undefined
+  if (expectedDimension && vector.length !== expectedDimension) return undefined
+
+  const cleaned: number[] = []
+  for (const value of vector) {
+    if (typeof value !== 'number' || !Number.isFinite(value)) {
+      return undefined
+    }
+    cleaned.push(value)
+  }
+  return cleaned
+}
+
+function getVectorLength(vector: unknown): number {
+  if (!vector) return 0
+  if (Array.isArray(vector)) return vector.length
+  const arrowVector = vector as { length?: number; toArray?: () => unknown[] }
+  if (typeof arrowVector.toArray === 'function') {
+    return arrowVector.toArray().length
+  }
+  return arrowVector.length ?? 0
+}
+
+async function tableHasStoredVectors(
+  table: { query: () => { select: (columns: string[]) => { toArray: () => Promise<Array<{ vector?: unknown }>> } } },
+): Promise<boolean> {
+  const rows = await table.query().select(['vector']).toArray()
+  return rows.some(row => getVectorLength(row.vector) > 0)
+}
+
+function inferVectorDimension(vectors?: number[][]): number {
+  if (!vectors) return 0
+  for (const vector of vectors) {
+    const normalized = normalizeVector(vector)
+    if (normalized) return normalized.length
+  }
+  return 0
+}
+
+function buildChunkSchema(vectorDimension: number): ArrowSchema {
+  const fields: Array<Field<any>> = [
+    new Field('id', new Utf8()),
+    new Field('docId', new Utf8()),
+    new Field('fileName', new Utf8()),
+    new Field('chapterNumber', new Int32(), true),
+    new Field('chapterTitle', new Utf8(), true),
+    new Field('text', new Utf8()),
+    new Field('chunkIndex', new Int32()),
+    new Field('totalChunks', new Int32()),
+    new Field('importedAt', new Utf8()),
+  ]
+
+  if (vectorDimension > 0) {
+    const vectorField: Field<any> = new Field(
+      'vector',
+      new ArrowFixedSizeList(vectorDimension, new Field('item', new Float32())),
+      true,
+    )
+    return new ArrowSchema([
+      ...fields.slice(0, 6),
+      vectorField,
+      ...fields.slice(6),
+    ])
+  }
+
+  return new ArrowSchema(fields)
+}
 
 // ===== 连接池（按项目路径缓存） =====
 
@@ -107,6 +196,34 @@ export async function addChunks(
   try {
     const db = await getConnection(projectPath)
     const now = new Date().toISOString()
+    const tableNames = await db.tableNames()
+    const hasChunksTable = tableNames.includes(TABLE_NAME)
+    const incomingVectorDimension = inferVectorDimension(vectors)
+    let existingVectorDimension = 0
+    let existingSchema: { fields: Array<{ name: string; type?: unknown }> } | undefined
+    let chunksTable:
+      | { query: () => { select: (columns: string[]) => { toArray: () => Promise<Array<{ vector?: unknown }>> } } }
+      | undefined
+    let shouldRebuildTable = false
+
+    if (hasChunksTable) {
+      const table = await db.openTable(TABLE_NAME)
+      chunksTable = table
+      existingSchema = await table.schema()
+      existingVectorDimension = getVectorDimensionFromSchema(existingSchema)
+      if (
+        existingVectorDimension > 0 &&
+        incomingVectorDimension > 0 &&
+        existingVectorDimension !== incomingVectorDimension &&
+        !(await tableHasStoredVectors(table))
+      ) {
+        shouldRebuildTable = true
+      }
+    }
+
+    const targetVectorDimension = shouldRebuildTable
+      ? incomingVectorDimension
+      : (existingVectorDimension || incomingVectorDimension)
 
     // 构建记录
     const records: ChunkRecord[] = chunks.map((text, i) => {
@@ -122,38 +239,24 @@ export async function addChunks(
         chapterTitle: metadata?.chapterTitle,
       }
       // 如果有向量，附加到记录上
-      if (vectors && vectors[i] && vectors[i].length > 0) {
-        record.vector = vectors[i]
+      const vector = normalizeVector(vectors?.[i], targetVectorDimension)
+      if (vector) {
+        record.vector = vector
       }
       return record
     })
 
     // 写入 chunks 表
-    const tableNames = await db.tableNames()
-    const VECTOR_DIM = 2048
-    const vectorField = new Field('vector', new ArrowFixedSizeList(VECTOR_DIM, new Field('item', new Float32())), true)
-    const targetSchema = new ArrowSchema([
-      new Field('id', new Utf8()),
-      new Field('docId', new Utf8()),
-      new Field('fileName', new Utf8()),
-      new Field('chapterNumber', new Int32(), true),
-      new Field('chapterTitle', new Utf8(), true),
-      new Field('text', new Utf8()),
-      vectorField,
-      new Field('chunkIndex', new Int32()),
-      new Field('totalChunks', new Int32()),
-      new Field('importedAt', new Utf8()),
-    ])
+    const targetSchema = buildChunkSchema(targetVectorDimension)
 
-    if (tableNames.includes(TABLE_NAME)) {
-      const table = await db.openTable(TABLE_NAME)
-      const existingSchema = await table.schema()
-      const existingFieldNames = existingSchema.fields.map(f => f.name)
+    if (hasChunksTable) {
+      const table = (chunksTable ?? await db.openTable(TABLE_NAME)) as Awaited<ReturnType<typeof db.openTable>>
+      const existingFieldNames = (existingSchema?.fields ?? []).map(f => f.name)
       // 检查旧表 schema 是否包含所有必要字段
-      const requiredFields = ['id', 'docId', 'fileName', 'text', 'chunkIndex', 'totalChunks', 'importedAt', 'chapterNumber', 'chapterTitle', 'vector']
-      const hasAllFields = requiredFields.every(f => existingFieldNames.includes(f))
+      const hasAllFields = REQUIRED_CHUNK_FIELDS.every(f => existingFieldNames.includes(f))
+      const hasVectorField = existingFieldNames.includes('vector')
 
-      if (hasAllFields) {
+      if (!shouldRebuildTable && hasAllFields && (hasVectorField || targetVectorDimension === 0)) {
         await table.add(records)
       } else {
         // schema 不匹配（旧表缺少字段），需要重建表
@@ -162,10 +265,13 @@ export async function addChunks(
         const cleanRows = allRows.map((r: Record<string, unknown>) => {
           const cleaned: Record<string, unknown> = {}
           for (const [k, v] of Object.entries(r)) {
-            if (k === 'vector' && v) {
+            if (k === 'vector') {
               // Arrow Vector → 纯数组
               const vec = v as { toArray?: () => number[] }
-              cleaned[k] = vec.toArray ? vec.toArray() : v
+              const normalized = normalizeVector(vec?.toArray ? vec.toArray() : v, targetVectorDimension)
+              if (normalized) {
+                cleaned[k] = normalized
+              }
             } else {
               cleaned[k] = v
             }
@@ -390,7 +496,7 @@ export async function getStats(projectPath: string): Promise<KBStats> {
       const vectorField = schema.fields.find(f => f.name === 'vector')
       if (vectorField) {
         hasVectors = true
-        vectorDimension = 2048 // 向量维度（需与 Embedding 模型输出匹配）
+        vectorDimension = getVectorDimensionFromField(vectorField)
       }
     } catch { /* 忽略 */ }
 
@@ -499,10 +605,32 @@ export async function updateChunkVectors(
     const table = await db.openTable(TABLE_NAME)
     const schema = await table.schema()
     const hasVectorCol = schema.fields.some(f => f.name === 'vector')
+    const existingVectorDimension = getVectorDimensionFromSchema(schema)
+    const incomingVectorDimension = inferVectorDimension(updates.map(update => update.vector))
+    const shouldRebuildVectorSchema = (
+      hasVectorCol &&
+      existingVectorDimension > 0 &&
+      incomingVectorDimension > 0 &&
+      existingVectorDimension !== incomingVectorDimension &&
+      !(await tableHasStoredVectors(table))
+    )
+    const targetVectorDimension = shouldRebuildVectorSchema
+      ? incomingVectorDimension
+      : (existingVectorDimension || incomingVectorDimension)
+    const normalizedUpdates = updates
+      .map(update => {
+        const vector = normalizeVector(update.vector, targetVectorDimension)
+        return vector ? { id: update.id, vector } : undefined
+      })
+      .filter((update): update is { id: string; vector: number[] } => Boolean(update))
 
-    if (hasVectorCol) {
+    if (normalizedUpdates.length === 0) {
+      return { success: false, count: 0 }
+    }
+
+    if (hasVectorCol && !shouldRebuildVectorSchema) {
       // 如果已有 vector 列，直接 update
-      for (const update of updates) {
+      for (const update of normalizedUpdates) {
         try {
           await table.update({
             where: `id = '${update.id}'`,
@@ -512,31 +640,18 @@ export async function updateChunkVectors(
           console.warn(`[Vela VectorStore] 更新块 ${update.id} 向量失败:`, e)
         }
       }
-      return { success: true, count: updates.length }
+      return { success: true, count: normalizedUpdates.length }
     } else {
       // 没有 vector 列，必须覆写全表以增加列
       const allRecords = await table.query().toArray()
       const newData = allRecords.map((r: { [key: string]: unknown; id: string }) => {
-        const up = updates.find(u => u.id === r.id)
+        const up = normalizedUpdates.find(u => u.id === r.id)
         if (up) return { ...r, vector: up.vector }
         return r
       })
 
       // 使用显式 Schema 确保 vector 列正确持久化
-      const VECTOR_DIM = 2048
-      const vectorField = new Field('vector', new ArrowFixedSizeList(VECTOR_DIM, new Field('item', new Float32())), true)
-      const schema = new ArrowSchema([
-        new Field('id', new Utf8()),
-        new Field('docId', new Utf8()),
-        new Field('fileName', new Utf8()),
-        new Field('chapterNumber', new Int32(), true),
-        new Field('chapterTitle', new Utf8(), true),
-        new Field('text', new Utf8()),
-        vectorField,
-        new Field('chunkIndex', new Int32()),
-        new Field('totalChunks', new Int32()),
-        new Field('importedAt', new Utf8()),
-      ])
+      const schema = buildChunkSchema(targetVectorDimension)
 
       await db.dropTable(TABLE_NAME)
       await db.createTable(TABLE_NAME, newData, { schema })
@@ -549,7 +664,7 @@ export async function updateChunkVectors(
         console.warn('[Vela VectorStore] 回填覆写后 FTS 重建失败:', e)
       }
 
-      return { success: true, count: updates.length }
+      return { success: true, count: normalizedUpdates.length }
     }
   } catch (error) {
     console.error('[Vela VectorStore] 批量更新向量失败:', error)
