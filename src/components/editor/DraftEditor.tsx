@@ -25,6 +25,7 @@ import { DRAFT_STATUS_LABEL, DRAFT_STATUS_COLOR } from '../../shared/draft-statu
 import { PostProcessStatusPanel } from '../ui/PostProcessStatusPanel'
 import { getChapterFinalizeScope } from '../../services/workflows/workflow-utils'
 import { guardRepairPostProcess, guardReopenFinalizedChapter } from '../../services/workflow-guards'
+import { getFinalizeGuardMessage } from './draft-editor-guards'
 
 interface Props {
   filePath: string
@@ -176,6 +177,11 @@ export default function DraftEditor({ filePath, content }: Props) {
   /** 定稿 */
   const doFinalize = async () => {
     if (!meta || isChapterBusy) return
+    const guardMessage = getFinalizeGuardMessage({ isDirty })
+    if (guardMessage) {
+      toast.error(guardMessage)
+      return
+    }
     const ok = await confirm(
       `确定要将第 ${meta.chapterNumber} 章定稿吗？\n\n定稿后章节将进入稳定终稿状态，并触发正文同步和后处理。若后续仍需修改，仅允许对最新定稿章节重新编辑。`,
       {
