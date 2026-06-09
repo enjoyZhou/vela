@@ -162,10 +162,17 @@ async function syncEditorTabsForChapter(chapterNumber: number): Promise<void> {
   try {
     const { useEditorStore } = await import('../stores/editor-store')
     const tabs = useEditorStore.getState().tabs
+    const finalizedDraft = await ipc.invoke('db:draft-get-finalized', chapterNumber)
+    const manuscriptPath = finalizedDraft?.id ? `vela://manuscript/${finalizedDraft.id}` : null
 
-    // 找到与该章节相关的已打开 Tab（草稿文件路径包含 ch{N}）
+    // 找到与该章节相关的已打开 Tab（草稿文件路径包含 ch{N}，正文文件按 finalized draft id 精确匹配）
     const chapterPattern = new RegExp(`/ch${chapterNumber}/`)
-    const relatedTabs = tabs.filter(t => t.filePath && chapterPattern.test(t.filePath))
+    const relatedTabs = tabs.filter(t =>
+      t.filePath && (
+        chapterPattern.test(t.filePath)
+        || (manuscriptPath !== null && t.filePath === manuscriptPath)
+      )
+    )
 
     for (const tab of relatedTabs) {
       if (!tab.filePath) continue

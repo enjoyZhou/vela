@@ -252,6 +252,8 @@ export function createFinalizeWorkflow(params: FinalizeOnlyParams): WorkflowDefi
             filePath: dbPath,
             content: fullContent?.content || '',
           })
+          // openFile 在复用已打开 tab 时只更新标题，这里显式同步正文内容。
+          useEditorStore.getState().syncTabContent(dbPath, fullContent?.content || '')
         }
       }
     },

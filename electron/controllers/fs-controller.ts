@@ -7,6 +7,12 @@ import { FileNode } from '../../src/shared/ipc-channels'
 // 全局文件操作锁（按文件绝对路径分配 Mutex 队列）
 const fileMutexMap = new Map<string, Promise<void>>()
 
+function assertFilesystemPath(filePath: string): void {
+  if (filePath.startsWith('vela://')) {
+    throw new Error(`Protocol path is not a filesystem path: ${filePath}`)
+  }
+}
+
 /** 互斥锁执行器：确保同一文件的读写完全串行排队 */
 async function withFileMutex<T>(filePath: string, task: () => Promise<T>): Promise<T> {
   // Normalize path across OS
@@ -38,6 +44,7 @@ export function registerFSController() {
   // 安全的异步读取
   ipcMain.handle('fs:read-file', async (_event, filePath: string) => {
     try {
+      assertFilesystemPath(filePath)
       return await withFileMutex(filePath, async () => {
         const content = await fsPromises.readFile(filePath, 'utf-8')
         return { success: true, content }
@@ -50,12 +57,27 @@ export function registerFSController() {
   // 跨平台绝对安全异步写入（防踩空）
   ipcMain.handle('fs:write-file', async (_event, filePath: string, content: string) => {
     try {
+      assertFilesystemPath(filePath)
       return await withFileMutex(filePath, async () => {
         await fsPromises.mkdir(path.dirname(filePath), { recursive: true })
         // 先写到临时文件再原位替换，绝对防止 0KB 碎屑踩空现象
         const tempPath = `${filePath}.${Date.now()}.tmp`
         await fsPromises.writeFile(tempPath, content, 'utf-8')
         await fsPromises.rename(tempPath, filePath)
+        return { success: true }
+      })
+    } catch (error) {
+      return { success: false, error: String(error) }
+    }
+  })
+
+  ipcMain.handle('fs:rename-file', async (_event, fromPath: string, toPath: string) => {
+    try {
+      assertFilesystemPath(fromPath)
+      assertFilesystemPath(toPath)
+      return await withFileMutex(fromPath, async () => {
+        await fsPromises.mkdir(path.dirname(toPath), { recursive: true })
+        await fsPromises.rename(fromPath, toPath)
         return { success: true }
       })
     } catch (error) {
@@ -73,6 +95,7 @@ export function registerFSController() {
 
   ipcMain.handle('fs:mkdir', async (_event, dirPath: string) => {
     try {
+      assertFilesystemPath(dirPath)
       fs.mkdirSync(dirPath, { recursive: true })
       return { success: true }
     } catch (error) {
@@ -81,11 +104,13 @@ export function registerFSController() {
   })
 
   ipcMain.handle('fs:check-exists', async (_event, filePath: string) => {
+    assertFilesystemPath(filePath)
     return fs.existsSync(filePath)
   })
 
   ipcMain.handle('fs:read-json', async (_event, filePath: string) => {
     try {
+      assertFilesystemPath(filePath)
       return await withFileMutex(filePath, async () => {
         const content = await fsPromises.readFile(filePath, 'utf-8')
         return { success: true, data: JSON.parse(content) }
@@ -97,6 +122,7 @@ export function registerFSController() {
 
   ipcMain.handle('fs:write-json', async (_event, filePath: string, data: unknown) => {
     try {
+      assertFilesystemPath(filePath)
       return await withFileMutex(filePath, async () => {
         await fsPromises.mkdir(path.dirname(filePath), { recursive: true })
         const tempPath = `${filePath}.${Date.now()}.tmp`

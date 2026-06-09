@@ -216,3 +216,29 @@ export async function guardRepairPostProcess(chapterNumber: number): Promise<Gua
 
   return { ok: true }
 }
+
+/**
+ * 重新编辑定稿章节的前置校验：
+ * 只允许对最新定稿章节执行重新编辑，避免破坏后续章节上下文链。
+ */
+export async function guardReopenFinalizedChapter(chapterNumber: number): Promise<GuardResult> {
+  const project = useProjectStore.getState().currentProject
+  if (!project) {
+    return { ok: false, message: '请先打开或新建一个项目。' }
+  }
+
+  const maxFinalized = await ipc.invoke('db:draft-get-max-finalized-chapter')
+
+  if (maxFinalized === 0) {
+    return { ok: false, message: '尚无已定稿章节，无法执行重新编辑。' }
+  }
+
+  if (chapterNumber !== maxFinalized) {
+    return {
+      ok: false,
+      message: `只允许重新编辑最新定稿章节（第 ${maxFinalized} 章）。\n\n回溯修改第 ${chapterNumber} 章会破坏后续章节的角色状态和上下文链。`,
+    }
+  }
+
+  return { ok: true }
+}

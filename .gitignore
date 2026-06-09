@@ -35,3 +35,8 @@ Thumbs.db
 *.local
 dist-ssr
 tailwind.config.js.bak
+
+.history/
+
+# 测试文件都要忽略
+*.test.ts

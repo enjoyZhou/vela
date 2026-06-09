@@ -72,6 +72,10 @@ export interface FileChannels {
     args: [filePath: string, content: string]
     return: { success: boolean; error?: string }
   }
+  'fs:rename-file': {
+    args: [fromPath: string, toPath: string]
+    return: { success: boolean; error?: string }
+  }
   'fs:list-dir': {
     args: [dirPath: string]
     return: FileNode[]

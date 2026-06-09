@@ -23,6 +23,7 @@ import { useLayoutStore } from '../../stores/layout-store'
 
 
 import { ipc } from '../../services/ipc-client'
+import { saveChapterContent } from '../../services/manuscript-save'
 import { toast } from '../ui/Toast'
 
 import { clearChapterTitleCache } from './Sidebar'
@@ -587,14 +588,14 @@ export default function EditorArea({ onNewProject }: EditorAreaProps) {
           />
         )}
         {activeTab?.type === 'chapter' && !activeTab.filePath?.startsWith('vela://draft/') && (
-          // 【DB 迁移备注】：终稿目前作为物理文件保存在 manuscript/ 目录是合理的（用于外部阅读器或最终打包编译导出）
-          // 终稿文件（manuscript/）：用 ProseEditorWrapper（含字数信息栏）
+          // 已定稿正文：tab 使用 vela://manuscript/{id} 作为虚拟路径。
+          // 保存时先更新 DB，再同步项目根目录 txt 文件。
           <ProseEditorWrapper
             key={activeTab.id}
             tab={activeTab}
             onSave={async (text) => {
               if (!activeTab.filePath) return
-              await ipc.invoke('fs:write-file', activeTab.filePath, text)
+              await saveChapterContent(activeTab.filePath, text)
               // 清除 dirty 标记 + 同步内容 + 刷新章节名缓存
               useEditorStore.getState().markTabSaved(activeTab.id)
               useEditorStore.getState().syncTabContent(activeTab.id, text)

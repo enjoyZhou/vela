@@ -1,5 +1,5 @@
 import { useState, useRef, useEffect, useCallback } from 'react'
-import { Sparkles, Search, BadgeCheck, Save, FileStack, FileText, Wrench } from 'lucide-react'
+import { Sparkles, Search, BadgeCheck, Save, FileStack, FileText, Wrench, Pencil } from 'lucide-react'
 
 import { useProjectStore } from '../../stores/project-store'
 import { useEditorStore } from '../../stores/editor-store'
@@ -24,7 +24,7 @@ import { ipc } from '../../services/ipc-client'
 import { DRAFT_STATUS_LABEL, DRAFT_STATUS_COLOR } from '../../shared/draft-status'
 import { PostProcessStatusPanel } from '../ui/PostProcessStatusPanel'
 import { getChapterFinalizeScope } from '../../services/workflows/workflow-utils'
-import { guardRepairPostProcess } from '../../services/workflow-guards'
+import { guardRepairPostProcess, guardReopenFinalizedChapter } from '../../services/workflow-guards'
 
 interface Props {
   filePath: string
@@ -177,7 +177,7 @@ export default function DraftEditor({ filePath, content }: Props) {
   const doFinalize = async () => {
     if (!meta || isChapterBusy) return
     const ok = await confirm(
-      `确定要将第 ${meta.chapterNumber} 章定稿吗？\n\n定稿后章节将标记为完成，不再支持修改和重新后处理。`,
+      `确定要将第 ${meta.chapterNumber} 章定稿吗？\n\n定稿后章节将进入稳定终稿状态，并触发正文同步和后处理。若后续仍需修改，仅允许对最新定稿章节重新编辑。`,
       {
         title: '确认定稿',
         confirmText: '确认定稿',
@@ -200,6 +200,39 @@ export default function DraftEditor({ filePath, content }: Props) {
       toast.error(`定稿启动失败：${e}`)
     }
   }
+
+  /** 重新编辑定稿章节 */
+  const doReopenFinalize = useCallback(async () => {
+    if (!meta || status !== 'finalized' || isChapterBusy) return
+
+    try {
+      const guard = await guardReopenFinalizedChapter(meta.chapterNumber)
+      if (!guard.ok) {
+        toast.error(guard.message || '无法重新编辑该章节')
+        return
+      }
+
+      const ok = await confirm(
+        '重新编辑后，本章将退出稳定定稿状态。\n\n已有的定稿后处理结果将视为过期，完成修改后需要重新定稿。',
+        {
+          title: '确认重新编辑',
+          confirmText: '重新编辑',
+        }
+      )
+      if (!ok) return
+
+      await ipc.invoke('db:draft-update-status', meta.id, 'revised', currentBodyRef.current.length)
+      setMeta(prev => prev ? { ...prev, status: 'revised' } : prev)
+
+      const { useDraftStore } = await import('../../stores/draft-store')
+      await useDraftStore.getState().loadChapterDrafts(meta.chapterNumber)
+      await useProjectStore.getState().refreshFileTree()
+
+      toast.success('已退出定稿状态，可以继续编辑并重新定稿')
+    } catch (e) {
+      toast.error(`重新编辑启动失败：${e}`)
+    }
+  }, [meta, status, isChapterBusy])
 
   /** 修复定稿后处理 — 只重跑失败的步骤 */
   const doRepairFinalize = useCallback(async () => {
@@ -435,6 +468,18 @@ export default function DraftEditor({ filePath, content }: Props) {
             <span className="text-xs" style={{ color: 'var(--color-text-muted)' }}>
               {status === 'finalized' ? '已定稿（只读）' : '已归档（只读）'}
             </span>
+            {status === 'finalized' && (
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={doReopenFinalize}
+                disabled={isChapterBusy}
+                title="退出定稿状态并恢复编辑"
+              >
+                <Pencil size={11} />
+                重新编辑
+              </Button>
+            )}
             {/* 已定稿 → 有失败项时显示修复定稿按钮 */}
             {status === 'finalized' && meta && hasProcessFailure && (
               <Button

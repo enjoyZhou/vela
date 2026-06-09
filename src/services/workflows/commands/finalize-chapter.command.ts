@@ -4,6 +4,11 @@ import { useLLMStore } from '../../../stores/llm-store'
 import { getPromptTemplate } from '../../prompt-templates'
 import { PostProcessPromptBuilder } from '../../prompts/prompt-builder'
 import { ipc } from '../../ipc-client'
+import {
+  buildManuscriptPhysicalPath,
+  buildManuscriptTextContent,
+  resolveManuscriptTitle,
+} from '../../manuscript-save'
 
 import {
   runPostProcessPipeline,
@@ -258,17 +263,16 @@ export class FinalizeChapterCommand extends BaseWorkflowCommand<void> {
     await ipc.invoke('db:draft-update-status', dbDraft.id, 'finalized', refinedDraftText.length)
 
     // 【重要】：除了写入 DB，对于已定稿的章节需要实体化为物理文件放在根目录，供外部系统读取或备份
-    const safeTitle = this.params.chapterInfo.title ? ` ${this.params.chapterInfo.title.replace(/[/\\]/g, '_')}` : ''
-    const physicalPath = `${project.path}/第${this.params.chapterNumber}章${safeTitle}.txt`
+    const chapterTitle = await resolveManuscriptTitle(this.params.chapterNumber, this.params.chapterInfo.title)
+    const physicalPath = buildManuscriptPhysicalPath(project.path, this.params.chapterNumber, chapterTitle)
     try {
-      const titleLine = this.params.chapterInfo.title ? `第${this.params.chapterNumber}章 ${this.params.chapterInfo.title}\n\n` : `第${this.params.chapterNumber}章\n\n`
-      const contentToWrite = titleLine + refinedDraftText.replace(/^#+ .*\n*/, '')
+      const contentToWrite = buildManuscriptTextContent(this.params.chapterNumber, chapterTitle, refinedDraftText)
       await ipc.invoke('fs:write-file', physicalPath, contentToWrite)
     } catch (e) {
       callbacks.log(`⚠️ 写入根目录物理文件失败: ${String(e)}`)
     }
 
-    callbacks.log(`✅ 定稿内容已正式写入 SQLite 数据库并同步为根目录文件 (第${this.params.chapterNumber}章${safeTitle}.txt)`)
+    callbacks.log(`✅ 定稿内容已正式写入 SQLite 数据库并同步为根目录文件 (${physicalPath.split('/').pop()})`)
 
     // 3. 通过 PostProcessPipeline 执行后处理（状态持久化 + 支持重试）
     callbacks.log('🚀 正在启动后台大模型推演系统更新全书状态...')
