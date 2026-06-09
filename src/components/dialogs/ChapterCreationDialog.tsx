@@ -5,6 +5,7 @@ import { useLLMStore } from '../../stores/llm-store'
 import { useWorkflowStore } from '../../stores/workflow-store'
 
 import { createChapterWorkflow } from '../../services/workflows/chapter-workflow'
+import { buildChapterWorkflowInput } from '../../services/workflows/chapter-creation-payload'
 import { guardChapterWriting } from '../../services/workflow-guards'
 import { ipc } from '../../services/ipc-client'
 import { toast } from '../ui/Toast'
@@ -40,6 +41,7 @@ export default function ChapterCreationDialog({ isOpen, onClose, prefill }: Prop
   const [purpose, setPurpose] = useState('')
   const [keyEvents, setKeyEvents] = useState('')
   const [characters, setCharacters] = useState('')
+  const [suspenseHook, setSuspenseHook] = useState('')
   const [userGuidance, setUserGuidance] = useState('')
   const [knowledgeHint, setKnowledgeHint] = useState('')
   const [wordsTarget, setWordsTarget] = useState<number | ''>(3000)
@@ -72,6 +74,7 @@ export default function ChapterCreationDialog({ isOpen, onClose, prefill }: Prop
           lastUsed?: {
             chapterNumber: number; title?: string; role: string
             purpose?: string; keyEvents?: string; characters?: string
+            suspenseHook?: string
             userGuidance?: string; wordsTarget?: number
           }
         }
@@ -84,6 +87,7 @@ export default function ChapterCreationDialog({ isOpen, onClose, prefill }: Prop
           setPurpose(last.purpose || '')
           setKeyEvents(last.keyEvents || '')
           setCharacters(last.characters || '')
+          setSuspenseHook(last.suspenseHook || '')
           setUserGuidance(last.userGuidance || '')
           setWordsTarget(last.wordsTarget || currentProject.novelConfig.wordsPerChapter || 3000)
           setLoadedFromHistory(true)
@@ -92,6 +96,7 @@ export default function ChapterCreationDialog({ isOpen, onClose, prefill }: Prop
       }
     } catch { /* 文件不存在，使用默认值 */ }
     // 默认值：根据已有稿件数量推断下一章节号
+    setSuspenseHook('')
     setWordsTarget(currentProject.novelConfig.wordsPerChapter || 3000)
     setChapterNumber(1)
     setLoadedFromHistory(false)
@@ -111,6 +116,7 @@ export default function ChapterCreationDialog({ isOpen, onClose, prefill }: Prop
         setPurpose(String(prefill.purpose || ''))
         setKeyEvents(String(prefill.keyEvents || ''))
         setCharacters(String(prefill.characters || ''))
+        setSuspenseHook(String(prefill.suspenseHook || ''))
         setUserGuidance(String(prefill.userGuidance || ''))
         setWordsTarget(currentProject.novelConfig.wordsPerChapter || 3000)
         setLoadedFromBlueprint(true)
@@ -136,7 +142,7 @@ export default function ChapterCreationDialog({ isOpen, onClose, prefill }: Prop
         log = existing.data as typeof log
       }
 
-      const params = { chapterNumber, title, role, purpose, keyEvents, characters, userGuidance, wordsTarget }
+      const params = { chapterNumber, title, role, purpose, keyEvents, characters, suspenseHook, userGuidance, wordsTarget }
       log.lastUsed = params
       log.history = [
         { ...params, createdAt: new Date().toISOString() },
@@ -174,16 +180,17 @@ export default function ChapterCreationDialog({ isOpen, onClose, prefill }: Prop
     // 持久化本次参数
     await saveParams()
 
-    const workflow = createChapterWorkflow({
-      chapterNumber: Number(chapterNumber) || 1,
-      title: title || `第${chapterNumber || 1}章`,
+    const workflow = createChapterWorkflow(buildChapterWorkflowInput({
+      chapterNumber,
+      title,
       role,
       purpose,
-      characters: characters.split(/[、,，]/).map(s => s.trim()).filter(Boolean),
       keyEvents,
+      characters,
+      suspenseHook,
       userGuidance,
-      knowledgeQueryHint: knowledgeHint.trim() || undefined,
-    })
+      knowledgeQueryHint: knowledgeHint,
+    }))
 
     // 启动任务后关闭设定弹窗，由全局 Overlay 接管展示
     startWorkflow(workflow, false)
@@ -287,6 +294,16 @@ export default function ChapterCreationDialog({ isOpen, onClose, prefill }: Prop
                   value={keyEvents}
                   onChange={(e) => setKeyEvents(e.target.value)}
                   placeholder="本章需要发生的关键事件..."
+                  rows={2}
+                />
+              </div>
+
+              <div>
+                <Label>末尾悬念钩子</Label>
+                <Textarea
+                  value={suspenseHook}
+                  onChange={(e) => setSuspenseHook(e.target.value)}
+                  placeholder="一句话说明结尾留了什么悬念..."
                   rows={2}
                 />
               </div>

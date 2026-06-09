@@ -7,6 +7,7 @@ import {
   DIR_PROMPTS
 } from '../../../shared/project-paths'
 import type { ChapterInfo } from '../chapter-workflow'
+import { applySharedChapterContext } from './generate-draft-context'
 
 export class GenerateDraftCommand extends BaseWorkflowCommand {
 
@@ -54,6 +55,8 @@ export class GenerateDraftCommand extends BaseWorkflowCommand {
       .withNovelConfig(project.novelConfig)
       .withWordNumber(project.novelConfig.wordsPerChapter)
 
+    applySharedChapterContext(promptBuilder, this.chapterInfo, futureBlueprintsStr)
+
     if (!isFirstChapter) {
       // 从蓝图 JSON 的 notes 字段读取章节要点时间线（按序拼装，利于前缀缓存）
       const chapterTimeline = await this.readChapterNotesTimeline(project.path, this.chapterInfo.chapterNumber)
@@ -91,11 +94,8 @@ export class GenerateDraftCommand extends BaseWorkflowCommand {
         .withCharacterStates(characterState)
         // ---- 缓存失效区（逐章变化）----
         .withPreviousEnding(previousEnding || '（无前文）')
-        .withChapterInfo(this.chapterInfo)
-        .withFutureBlueprints(futureBlueprintsStr)
         .withFilteredContext(filteredContext)
         .withShortSummary('')
-        .withUserGuidance(this.chapterInfo.userGuidance?.trim() || '（无微操指导）')
     }
 
     // Token 预算管控：中文约 1.5 字符/token，预留 4K 给输出

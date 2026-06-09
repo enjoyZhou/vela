@@ -15,6 +15,7 @@ import {
   type ChapterBlueprint,
   type DirectoryWorkflowParams,
 } from '../../services/workflows/directory-workflow'
+import { buildChapterCreationPrefillFromBlueprint } from '../../services/workflows/chapter-creation-payload'
 import { guardDirectoryGeneration } from '../../services/workflow-guards'
 import DirectoryConfigDialog from '../dialogs/DirectoryConfigDialog'
 import { Button } from '../ui/Button'
@@ -182,15 +183,7 @@ export default function ChapterCardEditor() {
    */
   const handleWriteChapter = (bp: ChapterBlueprint) => {
     // 通过 layout-store openChapterCreation 传递预填参数，替代 window.dispatchEvent
-    useLayoutStore.getState().openChapterCreation({
-      chapterNumber: bp.chapterNumber,
-      title: bp.title,
-      role: bp.role,
-      purpose: bp.purpose,
-      keyEvents: bp.keyEvents,
-      characters: bp.characters.join('、'),
-      userGuidance: bp.userGuidance || '',
-    })
+    useLayoutStore.getState().openChapterCreation(buildChapterCreationPrefillFromBlueprint(bp))
   }
 
   if (loading) {
